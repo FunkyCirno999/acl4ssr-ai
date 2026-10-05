@@ -26,6 +26,15 @@ https://raw.githubusercontent.com/cainiao524/acl4ssr-ai/main/ACL4SSR_Online_Full
 
 自己 fork 后改 `build.py` 里的 patch，让 Actions 每天重新生成。
 
+### 方式三：不用订阅转换站，直接喂给 mihomo / Clash Verge
+
+如果你不想经过第三方转换站（不想把订阅链接交给别人、或者你的转换站不支持自定义 base），
+可以把本仓库的 `base/clash-base.yaml` 当模板，自己拼出配置。好处是 **DNS 一定按你看到的那样生效**。
+
+> `ACL4SSR_Online_Full_ClaudeAI_MultiMode.ini` 是给 **subconverter** 用的，
+> 它本身不是一份可直接加载的 mihomo 配置 —— 它靠 `ruleset=` 引用几十个远程规则集，
+> 由转换器在生成时展开。
+
 ---
 
 ## 它改了什么
@@ -92,13 +101,120 @@ DOMAIN-SUFFIX,openai.com
 所以 `build.py` 用**锚点插入**，把新规则集放到 `AI.list` / `OpenAi.list` 那一组的紧后面
 （生成物实测：第 36 行，而 `ProxyGFWlist` 在第 63 行）。
 
-### 4️⃣ Steam 三分流：来自底板，原样保留
+### 4️⃣ 自带 `clash_rule_base` —— 补齐 DNS / sniffer / IPv6
+
+**这是最关键的一处，也是最容易被忽略的。**
+
+上游 ini 里这一行是**注释掉**的：
+
+```ini
+;clash_rule_base=https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/GeneralClashConfig.yml
+```
+
+于是 subconverter 用它自己的**内建模板** —— 而内建模板里**没有 `dns:` 段**。
+
+**没有 DNS 段不只是"不安全"，它会让分流本身失效：**
+
+| 后果 | 说明 |
+|---|---|
+| **`GEOIP,CN` 兜底失效** | 这条规则靠**真实解析结果**判断归属。DNS 配不好 → 国内小站被判成境外 → 落到 `FINAL` 走代理 → **绕道境外，明显变慢** |
+| **AI 域名解析可能被污染** | 用国内 DNS 解析 `claude.ai` |
+| **DNS 泄漏** | 把"你在访问 claude.ai"这一元数据交给本地 ISP |
+| **域名规则可能匹配不上** | 部分客户端默认 `enhanced-mode` 不是 fake-ip，目标已是 IP 时 `DOMAIN-SUFFIX` 规则失效 → AI 域名掉进 `FINAL` |
+| **IPv6 绕过** | 没有 `ipv6: false`。TUN 未接管 IPv6 时，解析出 AAAA 的域名会走物理网卡直连 —— **这是真实 IP 泄漏最短的一条路径，而客户端界面看不出任何异常** |
+
+（顺带一提：那个被注释掉的目标 `GeneralClashConfig.yml` 本身也是 **Clash for Windows 时代的老文件** —— 没有 `dns` 段、没有 `tun` 段、`ipv6: true`，还带着一堆 `cfw-*` 专有字段。）
+
+**本仓库的做法**：自带一份 [`base/clash-base.yaml`](./base/clash-base.yaml)，并在 `build.py` 里把那一行激活指向它：
+
+```ini
+clash_rule_base=https://raw.githubusercontent.com/cainiao524/acl4ssr-ai/main/base/clash-base.yaml
+```
+
+base 里写了：
+
+```yaml
+ipv6: false                    # 防 IPv6 绕过 TUN 泄漏真实 IP
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter: [18 条]      # 游戏联机 / P2P / NTP / 推送
+  respect-rules: true
+  nameserver: [doh.pub, alidns]
+  proxy-server-nameserver: [doh.pub]        # respect-rules 下缺它 mihomo 起不来
+  fallback: [1.1.1.1/dns-query, 8.8.8.8/dns-query]   # 只 DoH，绝不用明文/DoT
+  fallback-filter: {geoip: true, geoip-code: CN}
+  nameserver-policy:            # AI 域名固定走境外 DoH
+    "+.claude.ai":     [1.1.1.1/dns-query, 8.8.8.8/dns-query]
+    "+.anthropic.com": [1.1.1.1/dns-query, 8.8.8.8/dns-query]
+    "+.openai.com":    [1.1.1.1/dns-query, 8.8.8.8/dns-query]
+    ...                          # 共 9 条
+sniffer:                        # HTTP + TLS + QUIC 全开，保证 fake-ip 下按域名命中
+  enable: true
+  sniff: {HTTP: {...}, TLS: {...}, QUIC: {...}}
+```
+
+**⚠️ 但要注意**：有些订阅转换站会**忽略** ini 里的 `clash_rule_base`、强制用自己固定的模板。
+
+**怎么确认生效了**：生成配置后搜一下 `enhanced-mode` 是不是 `fake-ip`、`ipv6` 是不是 `false`。
+如果不是 → 换一个支持自定义 base 的转换站，或者改用 [Clash Verge](https://github.com/clash-verge-rev/clash-verge-rev) / mihomo 内核直接引用这份配置。
+
+### 5️⃣ Steam 三分流：来自底板，原样保留
 
 | 组 | 默认 | 说明 |
 |---|---|---|
 | `🎮 游戏下载` | **DIRECT** | 76 条 CDN，含 `dl.steam.clngaa.com` 等国内节点 —— 直连比走代理快得多 |
 | `🎮 Steam 商店/社区` | 节点选择 | 28 条，含 `steampowered.com` / `steamcommunity.com` / `steamstatic.com` |
 | `🎮 游戏平台` | **DIRECT** | Steam / Epic / Xbox / PlayStation / Nintendo … |
+
+---
+
+## 默认分流行为：本质是「国内直连、其余走代理」
+
+```
+ 1. LocalAreaNetwork / UnBan / GoogleCN        → 🎯 全球直连 = DIRECT
+ 2. BanAD / BanProgramAD                        → REJECT
+ 3. GoogleFCM / Bing / OneDrive / Microsoft / Apple → DIRECT
+ 4. Telegram                                    → 代理
+ 5. AI（166 条）                                → 💬 Ai平台 = 🔒 AI 专用（钉死）
+ 6. 网易音乐 / 游戏 / Steam / YouTube / Netflix / 巴哈 → 各自组
+ 7. 哔哩哔哩（41 条）                           → DIRECT
+ 8. 国内媒体                                    → DIRECT
+ 9. 国外媒体                                    → 代理
+10. ProxyGFWlist（7052 条）                     → 代理
+11. ChinaDomain（726 条）                       → DIRECT
+12. ChinaCompanyIp / Download                   → DIRECT
+13. GEOIP,CN                                    → DIRECT   ← 白名单兜底
+14. FINAL → 🐟 漏网之鱼                         → 🚀 节点选择 = 代理
+```
+
+**第 13 步是"国内白名单"强度的关键。** `ChinaDomain.list` 只有 **726 条**，而国内域名有几十万 ——
+真正兜住"国内小众站直连"的就是 `GEOIP,CN`：域名不在清单里没关系，解析出中国 IP 就直连。
+
+**→ 这也再次说明为什么第 4 节的 DNS 必须配好：`GEOIP,CN` 依赖真实解析结果。**
+
+### B 站会走代理吗？
+
+**不会。** 实测三个层面都是直连：
+
+- `Bilibili.list`（20 条）+ `BilibiliHMT.list`（21 条）在第 **59–60** 行，而 `ProxyGFWlist` 在第 **63** 行 → 先匹配者胜
+- `ProxyGFWlist` 里 B 站域名 **0 条**（`bilibili` / `hdslb` / `bilivideo` / `b23.tv` 全部为 0）
+- `📺 哔哩哔哩` 组默认就是 `🎯 全球直连` → `DIRECT`
+
+**唯一的特性**：`BilibiliHMT.list`（**港澳台限定番剧**）走的是同一个组，所以默认也直连 →
+港澳台限定内容依然看不了。想看的话在客户端把 `📺 哔哩哔哩` 切到 `🇨🇳 台湾节点`。
+
+### 顺带核查：GFWlist 里没有误伤国内服务
+
+```ini
+baidu   → baidu.jp            （百度日本站，走代理合理）
+weibo   → freeweibo.com / weiboleak.com / whatsonweibo.com   （第三方，非微博本体）
+zhihu   → duanzhihu.com / freezhihu.org                      （第三方）
+jd.com  → dbgjd.com                                          （第三方）
+```
+
+**全是名字沾边但完全无关的域名，没有误伤国内正主。**
 
 ---
 

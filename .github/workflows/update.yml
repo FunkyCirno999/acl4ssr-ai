@@ -36,6 +36,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # setup-python 带的是纯净解释器，PyYAML 不是标准库 ——
+      # 后面的 "Validate base" 步骤要解析 YAML，先装上。
+      - name: Install deps
+        run: python -m pip install --quiet pyyaml
+
       - name: Generate
         run: python build.py --report
 
