@@ -30,6 +30,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # 推送前要先把远端合进来，需要完整历史（默认 fetch-depth: 1 是浅克隆，
+          # 浅克隆下 merge 会因为找不到共同祖先而失败）
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -136,4 +140,35 @@ jobs:
             exit 0
           fi
           git commit -m "chore: 重新生成订阅配置 + 上游巡检（$(date -u +%Y-%m-%d)）"
-          git push
+
+          # ── 并发安全 ────────────────────────────────────────────────────────
+          # 本工作流会被多个事件触发（schedule / push / workflow_dispatch）。
+          # 后启动的那次 checkout 到的是【它被触发那一刻】的 HEAD，而不是
+          # 轮到它执行时的 HEAD —— 中间若有另一次运行提交过，直接 push 就会被
+          # non-fast-forward 拒绝，整次运行标红。
+          #
+          # 实测就撞上一次：push 触发的运行先在 18:45:36 推送成功，
+          # workflow_dispatch 那次基于旧 HEAD 提交，push 报
+          #     ! [rejected] main -> main (fetch first)
+          #
+          # 这种失败没有任何信息价值，反而会掩盖真正的错误。
+          # 所以：先 fetch + merge 远端，再推送；失败重试 3 次。
+          #
+          # 用 -X ours 而不是 rebase：本仓库要提交的两个文件都是【生成物】，
+          # 两边内容都"对"，取哪边只影响时间戳。非冲突的远端改动
+          # （比如有人直接改了 README）仍会正常合并进来 —— 这比 -s ours 安全。
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          for attempt in 1 2 3; do
+            if git fetch --quiet origin "$BRANCH"; then
+              git merge -X ours --no-edit FETCH_HEAD >/dev/null 2>&1 \
+                || git merge --abort >/dev/null 2>&1 || true
+            fi
+            if git push; then
+              echo "推送成功（第 $attempt 次尝试）"
+              exit 0
+            fi
+            echo "推送未成功，第 $attempt/3 次，5 秒后重试"
+            sleep 5
+          done
+          echo "::error::三次推送均失败"
+          exit 1
