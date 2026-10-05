@@ -100,6 +100,15 @@ OUTPUT_INI = "ACL4SSR_Online_Full_ClaudeAI_MultiMode.ini"
 # 锚点：上游「💬 Ai平台」那一组的最后一条 ruleset（OpenAi.list）
 ANCHOR = "ruleset=💬 Ai平台,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/OpenAi.list"
 
+# 本仓库自带的 subconverter 模板（base/clash-base.yaml）。
+# 上游 ini 里那一行 clash_rule_base 默认是【注释掉】的，于是 subconverter 用它
+# 自己的内建模板 —— 而内建模板里没有 dns 段。没有 dns 段的后果不只是不安全，
+# 还会让分流本身失效：GEOIP,CN 这条兜底要靠真实解析结果判断归属，DNS 配不好
+# 就会把国内小站判成境外、落到 FINAL 走代理。详见 base/clash-base.yaml 的注释。
+CLASH_RULE_BASE = (
+    "https://raw.githubusercontent.com/cainiao524/acl4ssr-ai/main/base/clash-base.yaml"
+)
+
 # 新增的 AI 规则集（Surge 格式 .list；jsDelivr 在国内比 raw 更稳，
 # 若你的转换器在境外且 jsDelivr 抖动，把 cdn.jsdelivr.net/gh 换成 raw.githubusercontent.com）
 AI_RULESETS = [
@@ -192,6 +201,30 @@ def apply_patch(text: str):
     # mihomo / subconverter 都允许组在文件任意位置声明，但放在一起最容易看懂。
     kept.insert(replaced_at + 1, AI_GROUP_REPLACEMENT[1])
     report["group_added"] = True
+
+    # ---- patch 4: 激活 clash_rule_base（DNS / sniffer / ipv6）----
+    #
+    # 上游 ini 里这一行是【注释掉】的：
+    #     ;clash_rule_base=https://.../Clash/GeneralClashConfig.yml
+    # 而那个被注释的目标本身也是 Clash for Windows 时代的老文件：没有 dns 段、
+    # 没有 tun 段、ipv6 还是 true。所以这里整行换成我们自己的 base。
+    base_re = re.compile(r"^\s*;?\s*clash_rule_base\s*=")
+    for index, line in enumerate(kept):
+        if base_re.match(line):
+            kept[index] = "clash_rule_base=%s" % CLASH_RULE_BASE
+            report["clash_base_activated"] = True
+            break
+    else:
+        # 上游把那行删了 —— 插到 enable_rule_generator 之前（同一区块）
+        inserted_at = None
+        for index, line in enumerate(kept):
+            if re.match(r"^\s*enable_rule_generator\s*=", line):
+                inserted_at = index
+                break
+        if inserted_at is None:
+            inserted_at = len(kept)
+        kept.insert(inserted_at, "clash_rule_base=%s" % CLASH_RULE_BASE)
+        report["clash_base_activated"] = "appended"
 
     # ---- 加文件头横幅 ----
     out = "\n".join(BANNER + [""] + kept)

@@ -1,0 +1,153 @@
+# =============================================================================
+#  subconverter 的 clash_rule_base —— 订阅转换站会把它当作模板
+# =============================================================================
+#
+#  subconverter 会把 proxies / proxy-groups / rules 注入到这个文件里，
+#  所以这三个键【绝对不能】出现在本文件中。
+#
+#  ── 为什么需要它 ─────────────────────────────────────────────────────────────
+#
+#  ACL4SSR 的 ini 里那一行 clash_rule_base 默认是注释掉的：
+#      ;clash_rule_base=https://.../Clash/GeneralClashConfig.yml
+#  于是 subconverter 用它自己的内建模板 —— 而内建模板里【没有 dns 段】。
+#
+#  没有 dns 段的后果不止是"不安全"，还会让分流本身失效：
+#    * GEOIP,CN 这条兜底需要真实解析结果才能判断归属。DNS 配不好 →
+#      国内小站被判成境外 → 落到 FINAL 走代理 → 绕道境外，明显变慢。
+#    * 用明文/国内 DNS 解析 claude.ai，既可能被污染，也把"你在访问它"
+#      这一元数据交给了本地 ISP。
+#    * 部分客户端的默认 enhanced-mode 不是 fake-ip，域名规则在"目标已是 IP"
+#      时就匹配不上，AI 域名会掉进 FINAL。
+#
+#  ── 这份 base 做了什么 ───────────────────────────────────────────────────────
+#    1) ipv6: false —— 关掉，防 IPv6 绕过 TUN 泄漏真实 IP
+#    2) dns: fake-ip + respect-rules + 只走加密 DoH + AI 域名分域解析
+#    3) sniffer: HTTP + TLS + QUIC 全开，保证 fake-ip 下规则仍能按域名命中
+#
+#  ── 注意 ─────────────────────────────────────────────────────────────────────
+#  * 有些订阅转换站会忽略 ini 里的 clash_rule_base、强制用自己的模板。
+#    如果你生成后发现 dns 段仍然不对，说明该站点不支持 —— 换一个站点，
+#    或者改用 Clash Verge / mihomo 内核直接引用（见 README）。
+#  * 本文件刻意不用 {{...}} 之类的模板占位符，保持是一份合法的普通 Clash 配置。
+# =============================================================================
+
+# 混合代理端口（HTTP/SOCKS5 共用）
+mixed-port: 7890
+mode: rule
+
+# ⚠️ 关闭 IPv6。原因：TUN 未接管 IPv6 时，解析出 AAAA 记录的域名会走物理网卡
+#    直连 —— 这是"真实 IP 泄漏"最短的一条路径，而且客户端界面上看不出异常。
+ipv6: false
+
+unified-delay: true
+tcp-concurrent: true
+log-level: info
+
+# ---------------------------------------------------------------------------
+# 域名嗅探：HTTP + TLS + QUIC 全开
+# ---------------------------------------------------------------------------
+# fake-ip 下大部分连接的目标地址已经是 198.18.x.x，规则要能按【域名】命中，
+# 就必须靠嗅探从 TLS SNI / HTTP Host / QUIC 里把域名还原出来。
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  parse-pure-ip: true
+  override-destination: false
+  sniff:
+    HTTP:
+      ports: [80, '8080-8880']
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+  skip-domain:
+    - '+.push.apple.com'
+    - 'Mijia Cloud'
+
+# ---------------------------------------------------------------------------
+# DNS：fake-ip + respect-rules + 国内 DoH + 境外加密 DoH
+# ---------------------------------------------------------------------------
+dns:
+  # ⚠️ 是 enable，不是 enabled —— 拼错整段 DNS 会静默失效
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+
+  # 这些域名【不做】fake-ip，保持真实解析。
+  # 因为靠 UDP 打洞或直接对 IP 建连的程序不认 fake-ip：游戏联机、P2P、
+  # NTP 对时、推送。全部用通配域名，不引入 geosite:/rule-set: 额外依赖。
+  fake-ip-filter:
+    - '+.lan'
+    - '+.local'
+    - 'localhost.ptlogin2.qq.com'
+    - '+.msftconnecttest.com'
+    - '+.msftncsi.com'
+    - 'dns.msftncsi.com'
+    - 'time.*.com'
+    - 'time.*.cn'
+    - 'ntp.*.com'
+    - 'ntp.*.cn'
+    - 'stun.*.*'
+    - 'stun.*.*.*'
+    - '+.push.apple.com'
+    - '+.n.n.srv.nintendo.net'
+    - '+.stun.playstation.net'
+    - '+.xboxlive.com'
+    - '+.battlenet.com.cn'
+    - 'Mijia Cloud'
+
+  # 让 DNS 查询本身也走规则：解析结果与分流策略保持一致，避免 DNS 泄漏
+  respect-rules: true
+
+  nameserver:
+    - "https://doh.pub/dns-query"
+    - "https://dns.alidns.com/dns-query"
+
+  # 分域解析：AI 域名固定用境外 DoH。
+  # 默认 nameserver 只有国内 DoH，而 fallback 仅在「国内 DoH 返回 CN 属地 IP」
+  # 时启用（fallback-filter geoip CN）—— 对 AI 域名这是错的口径：它们的正确
+  # 解析结果本来就不该是 CN IP，于是 fallback 永远不触发，等于没有兜底。
+  nameserver-policy:
+    "+.cn":
+      - "https://doh.pub/dns-query"
+      - "https://dns.alidns.com/dns-query"
+    "+.claude.ai":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+    "+.anthropic.com":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+    "+.claude.com":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+    "+.claudeusercontent.com":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+    "+.openai.com":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+    "+.chatgpt.com":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+    "+.oaistatic.com":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+    "+.oaiusercontent.com":
+      - "https://1.1.1.1/dns-query"
+      - "https://8.8.8.8/dns-query"
+
+  # respect-rules 打开时【必须】有 proxy-server-nameserver，否则 mihomo 起不来
+  proxy-server-nameserver:
+    - "https://doh.pub/dns-query"
+
+  # ⚠️ fallback 只用境外【加密 DoH】。绝不可写成 tls://8.8.4.4 这类直连 DoT：
+  #    respect-rules 为 false 时它们不走代理、从物理网卡直连，国内必然被墙，
+  #    命中 fallback 的域名每次新建连接都要干等约 5 秒；同时把
+  #    「本机正向境外 DNS 发加密查询」这一元数据暴露给本地 ISP。
+  fallback:
+    - "https://1.1.1.1/dns-query"
+    - "https://8.8.8.8/dns-query"
+  fallback-filter:
+    geoip: true
+    geoip-code: CN

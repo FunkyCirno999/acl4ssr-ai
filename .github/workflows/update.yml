@@ -68,7 +68,42 @@ jobs:
           test "$AI_LINE" -lt "$GFW_LINE" \
             || { echo "::error::新 AI 规则集排在 ProxyGFWlist 之后（会被抢先命中）"; exit 1; }
 
-          echo "自检通过：AI 组已钉死，规则集位置正确"
+          # clash_rule_base 必须被激活（DNS / sniffer / ipv6 都在那个文件里）
+          grep -q '^clash_rule_base=https://raw.githubusercontent.com/cainiao524/acl4ssr-ai/main/base/clash-base.yaml$' "$OUT" \
+            || { echo "::error::clash_rule_base 未激活 —— DNS 会退化成 subconverter 内建模板（无 dns 段）"; exit 1; }
+          # 它必须是【未注释】的那一行，不能只是把注释掉的默认值留着
+          if grep -q '^;clash_rule_base=' "$OUT"; then
+            echo "::error::仍存在被注释的 clash_rule_base，patch 可能没生效"; exit 1
+          fi
+
+          echo "自检通过：AI 组已钉死，规则集位置正确，clash_rule_base 已激活"
+
+      - name: Validate base
+        run: |
+          set -euo pipefail
+          # base 是交给订阅转换站的模板；它自己必须是合法 YAML，
+          # 且不能含 proxies/proxy-groups/rules —— subconverter 要往这三个键里注入内容，
+          # 模板里已有同名键会导致注入冲突。
+          python - <<'PY'
+          import sys, yaml, pathlib
+          d = yaml.safe_load(pathlib.Path("base/clash-base.yaml").read_text(encoding="utf-8"))
+          bad = [k for k in ("proxies", "proxy-groups", "rules") if k in d]
+          if bad:
+              sys.exit("::error::base 含 subconverter 要注入的键: %s" % bad)
+          if d.get("ipv6") is not False:
+              sys.exit("::error::base 的 ipv6 必须显式 false，否则 IPv6 会绕过 TUN")
+          dns = d.get("dns") or {}
+          if dns.get("enhanced-mode") != "fake-ip":
+              sys.exit("::error::base 的 dns.enhanced-mode 必须是 fake-ip")
+          if dns.get("respect-rules") is not True:
+              sys.exit("::error::base 必须开 dns.respect-rules")
+          if not dns.get("proxy-server-nameserver"):
+              sys.exit("::error::respect-rules 下缺 proxy-server-nameserver 会让 mihomo 起不来")
+          for s in dns.get("fallback") or []:
+              if not str(s).startswith("https://"):
+                  sys.exit("::error::fallback 只允许加密 DoH，发现: %s" % s)
+          print("base 校验通过：ipv6=false, fake-ip, respect-rules, fallback 全为 DoH")
+          PY
 
       - name: Commit if changed
         run: |
