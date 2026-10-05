@@ -1,0 +1,13 @@
+# 本仓库的脚本要在 Linux 的 GitHub Actions 上跑（update.yml 里的 build.py），
+# 而作者在 Windows 上编辑 —— 不锁定行尾会让 build.py 反复产生无意义的 diff。
+#
+# 统一 LF：Windows 检出时 git 也不会自动转成 CRLF。
+* text=auto eol=lf
+
+# 产物：内容由脚本决定，不要做任何行尾转换
+ACL4SSR_Online_Full_ClaudeAI_MultiMode.ini text eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary

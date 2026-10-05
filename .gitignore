@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 生成器产物【要提交】—— 订阅转换站直接引用它，必须留在仓库里。
+# 这一行是给将来的人看的：不要把它加进忽略列表。
+# !ACL4SSR_Online_Full_ClaudeAI_MultiMode.ini
+
+# 本地实验
+*.bak
+*.orig
+*.tmp
+*.log
+
+# 编辑器 / 操作系统
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store

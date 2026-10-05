@@ -1,0 +1,84 @@
+name: update
+
+# 每天从上游 cainiao524/acl4ssr-steam 拉底板 + 应用自家 patch，
+# 重新生成 ACL4SSR_Online_Full_ClaudeAI_MultiMode.ini。
+#
+# 做法与 acl4ssr-steam 自己维护游戏分流的方式一致：
+# 产物在仓库里，但只由脚本生成，改动永远可追溯到 build.py 里的 patch。
+
+on:
+  schedule:
+    # UTC 04:00 = 北京时间 12:00，避开 GitHub 的整点高峰
+    - cron: "0 4 * * *"
+  workflow_dispatch:        # 允许手动触发
+  push:
+    branches: [main]
+    paths:                  # patch 变了就立刻重建，不用等到第二天
+      - build.py
+      - .github/workflows/update.yml
+
+permissions:
+  contents: write           # 需要提交产物
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate
+        run: python build.py --report
+
+      - name: Sanity check
+        run: |
+          set -euo pipefail
+          OUT=ACL4SSR_Online_Full_ClaudeAI_MultiMode.ini
+          test -s "$OUT" || { echo "::error::产物为空"; exit 1; }
+
+          # 关键断言：patch 必须真的生效了。
+          # 只检查「文件生成成功」是不够的 —— 上游一旦改结构，build.py 会退化成
+          # 原样输出（或被锚点检查拦住），产物看着正常但其实一条 patch 都没打上。
+          grep -q 'custom_proxy_group=🔒 AI 专用`select`' "$OUT" \
+            || { echo "::error::「🔒 AI 专用」组缺失"; exit 1; }
+          grep -q 'custom_proxy_group=💬 Ai平台`select`\[\]🔒 AI 专用`\[\]🚀 手动切换$' "$OUT" \
+            || { echo "::error::「💬 Ai平台」组未按要求替换"; exit 1; }
+
+          AI_GRP=$(grep 'custom_proxy_group=💬 Ai平台`' "$OUT")
+          for bad in 自动选择 故障转移 负载均衡 DIRECT; do
+            case "$AI_GRP" in
+              *"$bad"*) echo "::error::「💬 Ai平台」仍含 $bad"; exit 1 ;;
+            esac
+          done
+
+          # 新规则集必须在 ProxyGFWlist 之前（先匹配者胜）
+          AI_LINE=$(grep -n 'ai-proxy-rules.*surge/anthropic' "$OUT" | head -1 | cut -d: -f1)
+          GFW_LINE=$(grep -n 'ruleset=🚀 节点选择,https://raw.githubusercontent.com/ACL4SSR' "$OUT" | head -1 | cut -d: -f1)
+          test -n "$AI_LINE" || { echo "::error::找不到新增的 anthropic 规则集"; exit 1; }
+          test -n "$GFW_LINE" || { echo "::error::找不到 ProxyGFWlist 规则集"; exit 1; }
+          test "$AI_LINE" -lt "$GFW_LINE" \
+            || { echo "::error::新 AI 规则集排在 ProxyGFWlist 之后（会被抢先命中）"; exit 1; }
+
+          echo "自检通过：AI 组已钉死，规则集位置正确"
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ACL4SSR_Online_Full_ClaudeAI_MultiMode.ini
+          if git diff --cached --quiet; then
+            echo "产物无变化，跳过提交"
+            exit 0
+          fi
+          git commit -m "chore: 重新生成订阅配置（上游 $(date -u +%Y-%m-%d)）"
+          git push
